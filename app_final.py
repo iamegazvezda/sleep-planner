@@ -25,6 +25,9 @@ def estimate(**fields) -> dict:
     return {**fields, "estimate": True, "note": NOTE}
 
 
+def reject(event: str, detail: str) -> None:
+    raise HTTPException(status_code=400, detail=detail)
+
 def cycle_options(
     anchor: int, cycles: int | None, cycle_minutes: int, latency: int,
     goal: Decimal, *, backwards: bool,
@@ -117,6 +120,28 @@ def create_app() -> FastAPI:
         result = estimate(
             bedtime=clock(bed), fall_asleep_at=clock(bed + latency), options=options,
             **recommendation(options, "wake", settings["SLEEP_GOAL_HOURS"]),
+        )
+        return result
+
+
+    @application.get("/sleep/debt")
+    def debt(
+        nights: str = Query(..., pattern=NIGHTS_PATTERN),
+        need: Decimal = Query(settings["SLEEP_GOAL_HOURS"], ge=4, le=12),
+    ):
+        values = [Decimal(value) for value in nights.split(",")]
+        if any(value > 16 for value in values):
+            reject("night_too_long", "Ночь не может длиться больше 16 часов")
+        total = sum(values, Decimal(0))
+        required = need * len(values)
+        result = estimate(
+            nights_count=len(values), total_hours=rounded_hours(total),
+            required_hours=rounded_hours(required),
+            debt_hours=rounded_hours(max(Decimal(0), required - total)),
+            surplus_hours=rounded_hours(max(Decimal(0), total - required)),
+            average_hours=rounded_hours(total / len(values)),
+            short_nights=sum(value < settings["SLEEP_GOAL_HOURS"] for value in values),
+            worst_night_hours=rounded_hours(min(values)),
         )
         return result
 
