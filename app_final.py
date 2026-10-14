@@ -1,11 +1,88 @@
 """Sleep Planner: расчёты по упрощённой модели сна, без хранения пользовательских данных."""
-from decimal import Decimal, ROUND_HALF_UP
+
+from contextlib import asynccontextmanager
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import logging
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+
 
 TIME_PATTERN = r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$"
 NIGHTS_PATTERN = r"^\d{1,2}(\.\d{1,2})?(,\d{1,2}(\.\d{1,2})?){0,13}$"
 DAY_MINUTES = 1440
 NOTE = "Оценка по средним значениям, не медицинская рекомендация"
+SOCIAL_CONTEXT = (
+    "У большинства людей социальный джетлаг от 1 часа; клинического порога нет"
+)
+SHIFT_CONTEXT = "Шаг сдвига - настройка сервиса, а не медицинская норма"
+CAFFEINE_BASIS = (
+    "Drake et al., 2013: 400 мг кофеина за 6 часов до сна сокращали сон больше чем на час"
+)
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+logger = logging.getLogger("sleep_planner")
+
+
+def read_text(name: str, default: str) -> str:
+    value = os.getenv(name, default).strip()
+    if not value:
+        raise ValueError(f"{name}: требуется непустая строка")
+    return value
+
+
+def read_integer(name: str, default: str, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError:
+        raise ValueError(
+            f"{name}: требуется целое число от {minimum} до {maximum}"
+        ) from None
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name}: требуется целое число от {minimum} до {maximum}")
+    return value
+
+
+def read_decimal(name: str, default: str, minimum: int, maximum: int) -> Decimal:
+    try:
+        value = Decimal(os.getenv(name, default))
+    except InvalidOperation:
+        raise ValueError(
+            f"{name}: требуется конечное число от {minimum} до {maximum}"
+        ) from None
+    if not value.is_finite() or not minimum <= value <= maximum:
+        raise ValueError(f"{name}: требуется конечное число от {minimum} до {maximum}")
+    return value
+
+
+def read_settings() -> dict:
+    """Загрузка до чтения; экспортированные переменные имеют приоритет."""
+    load_dotenv(Path(__file__).with_name(".env"))
+    settings = {
+        "APP_NAME": read_text("APP_NAME", "Sleep Planner"),
+        "APP_AUTHOR": read_text("APP_AUTHOR", "Alex Kryuchatov"),
+        "APP_VERSION": read_text("APP_VERSION", "1.0.0"),
+        "LOG_LEVEL": read_text("LOG_LEVEL", "INFO").upper(),
+        "CYCLE_MINUTES": read_integer("CYCLE_MINUTES", "90", 70, 110),
+        "FALL_ASLEEP_MINUTES": read_integer("FALL_ASLEEP_MINUTES", "15", 0, 60),
+        "SLEEP_GOAL_HOURS": read_decimal("SLEEP_GOAL_HOURS", "7", 4, 12),
+        "CAFFEINE_CUTOFF_HOURS": read_decimal("CAFFEINE_CUTOFF_HOURS", "6", 3, 12),
+    }
+    if settings["LOG_LEVEL"] not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ValueError("LOG_LEVEL: допустимы DEBUG, INFO, WARNING, ERROR, CRITICAL")
+    return settings
+
+
+def configure_logging(level: str) -> None:
+    """Один собственный stderr-handler, даже при повторных create_app в тестах."""
+    logger.setLevel(level)
+    if not any(handler.name == "sleep_planner_console" for handler in logger.handlers):
+        handler = logging.StreamHandler()
+        handler.set_name("sleep_planner_console")
+        handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        logger.addHandler(handler)
+
 
 def to_minutes(value: str) -> int:
     hours, minutes = value.split(":")
@@ -26,7 +103,10 @@ def estimate(**fields) -> dict:
 
 
 def reject(event: str, detail: str) -> None:
+    # Только фиксированное имя события; пользовательские значения не логируются.
+    logger.warning(event)
     raise HTTPException(status_code=400, detail=detail)
+
 
 def cycle_options(
     anchor: int, cycles: int | None, cycle_minutes: int, latency: int,
@@ -60,12 +140,21 @@ def recommendation(options: list[dict], key: str, goal: Decimal) -> dict:
 
 
 def create_app() -> FastAPI:
-    settings = {
-        "APP_NAME": "Sleep Planner", "APP_AUTHOR": "Alex Kryuchatov",
-        "APP_VERSION": "1.0.0", "CYCLE_MINUTES": 90,
-        "FALL_ASLEEP_MINUTES": 15, "SLEEP_GOAL_HOURS": Decimal("7"),
-    }
-    application = FastAPI(title=settings["APP_NAME"], version=settings["APP_VERSION"])
+    settings = read_settings()
+    configure_logging(settings["LOG_LEVEL"])
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        logger.info("service_started version=%s", settings["APP_VERSION"])
+        try:
+            yield
+        finally:
+            logger.info("service_stopped")
+
+    application = FastAPI(
+        title=settings["APP_NAME"], version=settings["APP_VERSION"],
+        description=NOTE, lifespan=lifespan,
+    )
 
     @application.get("/")
     def root():
@@ -102,6 +191,7 @@ def create_app() -> FastAPI:
             fall_asleep_minutes=latency, options=options,
             **recommendation(options, "bedtime", settings["SLEEP_GOAL_HOURS"]),
         )
+        logger.info("bedtime_calculated")
         return result
 
 
@@ -121,6 +211,7 @@ def create_app() -> FastAPI:
             bedtime=clock(bed), fall_asleep_at=clock(bed + latency), options=options,
             **recommendation(options, "wake", settings["SLEEP_GOAL_HOURS"]),
         )
+        logger.info("wake_time_calculated")
         return result
 
 
@@ -143,6 +234,7 @@ def create_app() -> FastAPI:
             short_nights=sum(value < settings["SLEEP_GOAL_HOURS"] for value in values),
             worst_night_hours=rounded_hours(min(values)),
         )
+        logger.info("debt_calculated nights=%d", len(values))
         return result
 
 
