@@ -1,0 +1,50 @@
+name: Sleep Planner CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest -v
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Assemble runnable source artifact
+        run: |
+          mkdir -p dist/scripts dist/.github/workflows
+          cp app_final.py test_app.py requirements.txt requirements-dev.txt README.md .gitignore dist/
+          cp .env.example dist/.env.example
+          cp .env.example dist/env.example
+          cp scripts/smoke_test.py dist/scripts/
+          cp .github/workflows/ci.yml dist/.github/workflows/
+      - name: Upload tested application
+        uses: actions/upload-artifact@v7
+        with:
+          name: sleep-planner
+          path: dist/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
