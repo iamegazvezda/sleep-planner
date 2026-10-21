@@ -164,16 +164,13 @@ def create_app() -> FastAPI:
             "docs": "/docs",
         }
 
-
     @application.get("/health")
     def health():
         return {"status": "ok"}
 
-
     @application.get("/version")
     def version():
         return {"version": settings["APP_VERSION"]}
-
 
     @application.get("/sleep/bedtime")
     def bedtime(
@@ -194,7 +191,6 @@ def create_app() -> FastAPI:
         logger.info("bedtime_calculated")
         return result
 
-
     @application.get("/sleep/wake-time")
     def wake_time(
         bedtime: str = Query(..., pattern=TIME_PATTERN),
@@ -213,7 +209,6 @@ def create_app() -> FastAPI:
         )
         logger.info("wake_time_calculated")
         return result
-
 
     @application.get("/sleep/debt")
     def debt(
@@ -237,6 +232,75 @@ def create_app() -> FastAPI:
         logger.info("debt_calculated nights=%d", len(values))
         return result
 
+    @application.get("/sleep/social-jetlag")
+    def social_jetlag(
+        work_bed: str = Query(..., pattern=TIME_PATTERN),
+        work_wake: str = Query(..., pattern=TIME_PATTERN),
+        free_bed: str = Query(..., pattern=TIME_PATTERN),
+        free_wake: str = Query(..., pattern=TIME_PATTERN),
+    ):
+        midpoints = []
+        for bed, wake in ((work_bed, work_wake), (free_bed, free_wake)):
+            start = to_minutes(bed)
+            duration = (to_minutes(wake) - start) % DAY_MINUTES
+            if not 60 <= duration <= 960:
+                reject(
+                    "invalid_sleep_duration",
+                    "Продолжительность сна должна быть от 1 до 16 часов",
+                )
+            midpoints.append((start + duration // 2) % DAY_MINUTES)
+        difference = abs(midpoints[1] - midpoints[0]) % DAY_MINUTES
+        jetlag = min(difference, DAY_MINUTES - difference)
+        result = estimate(
+            work_midpoint=clock(midpoints[0]), free_midpoint=clock(midpoints[1]),
+            jetlag_minutes=jetlag, jetlag=f"{jetlag // 60}:{jetlag % 60:02d}",
+            over_one_hour=jetlag >= 60, context=SOCIAL_CONTEXT,
+        )
+        logger.info("social_jetlag_calculated")
+        return result
+
+    @application.get("/sleep/caffeine")
+    def caffeine(
+        bedtime: str = Query(..., pattern=TIME_PATTERN),
+        hours_before: Decimal = Query(settings["CAFFEINE_CUTOFF_HOURS"], ge=3, le=12),
+    ):
+        # Для дробного числа часов перевод в целые минуты тоже HALF_UP.
+        minutes_before = int((hours_before * 60).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        result = estimate(
+            bedtime=clock(to_minutes(bedtime)),
+            last_coffee=clock(to_minutes(bedtime) - minutes_before),
+            hours_before=rounded_hours(hours_before), basis=CAFFEINE_BASIS,
+        )
+        logger.info("caffeine_calculated")
+        return result
+
+    @application.get("/sleep/shift-plan")
+    def shift_plan(
+        current: str = Query(..., pattern=TIME_PATTERN),
+        target: str = Query(..., pattern=TIME_PATTERN),
+        step: int = Query(15, ge=5, le=60),
+    ):
+        start, finish = to_minutes(current), to_minutes(target)
+        earlier = (start - finish) % DAY_MINUTES
+        later = (finish - start) % DAY_MINUTES
+        direction = "earlier" if earlier <= later else "later"
+        difference = min(earlier, later)
+        days = (difference + step - 1) // step
+        if days > 60:
+            reject("shift_too_long", "Слишком долгий переход, увеличьте step")
+        sign = -1 if direction == "earlier" else 1
+        plan = [
+            {"day": day, "bedtime": clock(start + sign * min(day * step, difference))}
+            for day in range(1, days + 1)
+        ]
+        result = estimate(
+            direction=direction, total_shift_minutes=difference,
+            days=days, plan=plan, context=SHIFT_CONTEXT,
+        )
+        if difference == 0:
+            result["message"] = "Режим уже совпадает"
+        logger.info("shift_plan_calculated days=%d", days)
+        return result
 
     return application
 
