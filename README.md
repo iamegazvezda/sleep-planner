@@ -492,3 +492,9 @@ python -m uvicorn app_final:app --host 127.0.0.1 --port 8000 --no-access-log
 | 18.10 | `Configure CI and artifact` | CI push/PR, упаковка и smoke-проверка |
 | 21.10 | `Add social jetlag, caffeine and shift plan` | Ещё три операции и их тесты |
 | 24.10 | `Complete setup and diagnostics guide` | Полный README: запуск, API, формулы, диагностика |
+
+## Проверка локальных файлов перед публикацией
+
+Перед отправкой изменений выполни `git status --short` и `git ls-files`.
+В списке отслеживаемых файлов не должно быть личного `.env`, `.venv`,
+кэшей и журналов. `.env.example` и `.gitignore` должны оставаться в Git.
